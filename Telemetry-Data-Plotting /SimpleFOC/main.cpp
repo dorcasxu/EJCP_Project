@@ -940,7 +940,7 @@ void setup()
     // 💡 黄金肌肉参数
     motors[i].voltage_limit = 5.5;    // 最大力气 5.5V
     motors[i].velocity_limit = 3.0;   // 优雅限速 3.0
-    motors[i].P_angle.P = 6.0;        // 刚度 6.0
+    motors[i].P_angle.P = 7.0;        // 刚度 7.0
     motors[i].P_angle.D = 0.12;        // 防抖 0.12
     motors[i].PID_velocity.I = 3.0;   // 恢复记忆，死磕到 90度   
 
@@ -1034,27 +1034,43 @@ void loop()
   } 
   
 // ========================================================
-// 【新增】速度前馈（Feedforward）+ 小低通滤波 —— 更丝滑、更干净
-// ff_gain 推荐先用 1.0f（你上次视频已经很棒），想更贴再调到 1.1f
-static float ff_gain = 1.0f;          // ← 前馈强度
-static float last_target = 0.0f;
-static float ff_filtered = 0.0f;      // ← 新增：低通滤波器状态变量
+// 【最终稳定版】真正速度前馈 + 强双平滑 + 软限幅
+// 目标：彻底压制偶尔 >0.7 的孤立尖峰，同时保持当前极致跟踪
+// ========================================================
+static float ff_gain          = 0.58f;   // ← 再微调低一点（压制尖峰）
+static float target_smoothed  = 0.0f;
+static float prev_smoothed    = 0.0f;
+static float ff_filtered      = 0.0f;
 
-// 只在 angle 模式下才加前馈（痛觉反射时自动跳过）
+const float smooth_alpha = 0.96f;        // ← 更强位置平滑
+const float ff_alpha     = 0.95f;        // ← 更强前馈低通（关键！）
+const float ff_clip      = 0.45f;        // ← 新增：软限幅，防止孤立尖峰超过 ±0.45
+
 if (motors[0].controller == MotionControlType::angle) {
-    float target_vel = motors[0].target - last_target;
-
-    // 【核心三行】计算原始前馈 + 低通滤波
-    float raw_ff = ff_gain * target_vel;                    // 1. 原始前馈值
-    ff_filtered = ff_filtered * 0.85f + raw_ff * 0.15f;    // 2. 低通滤波（0.85是滤波系数，越高越平滑）
-    motors[0].voltage.q += ff_filtered;                     // 3. 最终加到电压上
-
-    last_target = motors[0].target;
+    
+    // 1. 强平滑目标位置
+    target_smoothed = target_smoothed * smooth_alpha + motors[0].target * (1.0f - smooth_alpha);
+    
+    // 2. 计算真实速度
+    float raw_vel   = target_smoothed - prev_smoothed;
+    
+    // 3. 前馈 + 强低通 + 软限幅（这是压制偶尔大尖峰的核心）
+    float raw_ff    = ff_gain * raw_vel;
+    ff_filtered     = ff_filtered * ff_alpha + raw_ff * (1.0f - ff_alpha);
+    
+    // 软限幅：任何时候 Effort 前馈都不超过 ±0.45
+    if (ff_filtered >  ff_clip) ff_filtered =  ff_clip;
+    if (ff_filtered < -ff_clip) ff_filtered = -ff_clip;
+    
+    motors[0].voltage.q += ff_filtered;
+    
+    prev_smoothed = target_smoothed;
 }
 else {
-    // 痛觉反射期间或刚唤醒时，强制同步 last_target
-    last_target = motors[0].target;
-    ff_filtered = 0.0f;   // 额外保险：反射期间把滤波器清零，避免下次跳变
+    // 痛觉反射期间强制重置所有状态
+    target_smoothed = motors[0].target;
+    prev_smoothed   = motors[0].target;
+    ff_filtered     = 0.0f;
 }
 // ========================================================
 
