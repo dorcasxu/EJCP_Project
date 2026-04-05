@@ -241,3 +241,62 @@ for (size_t i = 0; i < MAX_MOTORS; i++) {
 ```
 
 **在这行之后、植物神经块之前**，直接插入feedforward 代码（完整可复制）
+
+
+### 3. **最终优化版代码（直接替换）**
+
+请把下面**完整代码块**替换掉你当前的前馈部分：
+
+C++
+
+```
+// ========================================================
+// 【最终稳定版】真正速度前馈 + 强双平滑 + 软限幅
+// 目标：彻底压制偶尔 >0.7 的孤立尖峰，同时保持当前极致跟踪
+// ========================================================
+static float ff_gain          = 0.58f;   // ← 再微调低一点（压制尖峰）
+static float target_smoothed  = 0.0f;
+static float prev_smoothed    = 0.0f;
+static float ff_filtered      = 0.0f;
+
+const float smooth_alpha = 0.96f;        // ← 更强位置平滑
+const float ff_alpha     = 0.95f;        // ← 更强前馈低通（关键！）
+const float ff_clip      = 0.45f;        // ← 新增：软限幅，防止孤立尖峰超过 ±0.45
+
+if (motors[0].controller == MotionControlType::angle) {
+    
+    // 1. 强平滑目标位置
+    target_smoothed = target_smoothed * smooth_alpha + motors[0].target * (1.0f - smooth_alpha);
+    
+    // 2. 计算真实速度
+    float raw_vel   = target_smoothed - prev_smoothed;
+    
+    // 3. 前馈 + 强低通 + 软限幅（这是压制偶尔大尖峰的核心）
+    float raw_ff    = ff_gain * raw_vel;
+    ff_filtered     = ff_filtered * ff_alpha + raw_ff * (1.0f - ff_alpha);
+    
+    // 软限幅：任何时候 Effort 前馈都不超过 ±0.45
+    if (ff_filtered >  ff_clip) ff_filtered =  ff_clip;
+    if (ff_filtered < -ff_clip) ff_filtered = -ff_clip;
+    
+    motors[0].voltage.q += ff_filtered;
+    
+    prev_smoothed = target_smoothed;
+}
+else {
+    // 痛觉反射期间强制重置所有状态
+    target_smoothed = motors[0].target;
+    prev_smoothed   = motors[0].target;
+    ff_filtered     = 0.0f;
+}
+// ========================================================
+```
+
+**参数效果一览**（你现在直接用这组即可）：
+
+| 参数           | 当前值  | 作用         |
+| ------------ | ---- | ---------- |
+| ff_gain      | 0.58 | 前馈强度（压制尖峰） |
+| smooth_alpha | 0.96 | 位置轨迹更柔和    |
+| ff_alpha     | 0.95 | 前馈输出极干净    |
+| ff_clip      | 0.45 | 硬性封顶孤立尖峰   |
